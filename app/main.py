@@ -17,7 +17,7 @@ if openai_api_key:
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 
-app = FastAPI(title="SAP SmartForm Node Field Mapping Explainer API")
+app = FastAPI(title="SAP SmartForm Node Field Mapping Explainer API (Batch Optimized)")
 
 
 # ---- Input Models ----
@@ -46,27 +46,46 @@ class SmartFormInput(BaseModel):
     nodes: List[Node]
 
 
-# ---- LLM Explainer ----
-def build_chain(node: Node):
+# ---- LLM Batch Explainer ----
+def llm_explain_nodes(nodes: List[Node]):
     SYSTEM_MSG = "You are an SAP SmartForm and ABAP expert. Always respond in strict JSON."
 
     USER_TEMPLATE = """
-You are reviewing a SmartForm node.
+You are reviewing multiple SmartForm nodes.
 
-Explain its **technical mapping and coding** in table format (JSON row).
+For each node, explain its **technical mapping and coding**.
 
-Return ONLY strict JSON:
-{{
-  "elemName": "{elemName}",
-  "path": "{path}",
-  "nodeType": "{nodeType}",
-  "attributes": {attributes_json},
-  "mapping": "<SAP table.field or variable it is linked to>",
-  "coding": "<ABAP code or condition behind it if any>",
-  "usage": "<how it is used in the SmartForm page>"
-}}
+Return ONLY a strict JSON array of rows like this:
+[
+  {{
+    "elemName": "...",
+    "path": "...",
+    "nodeType": "...",
+    "attributes": [...],
+    "mapping": "...",
+    "coding": "...",
+    "usage": "..."
+  }},
+  ...
+]
+
+Here are the nodes:
+{nodes_json}
 """
 
+    # Convert nodes to clean JSON input
+    nodes_data = []
+    for node in nodes:
+        nodes_data.append({
+            "elemName": node.elemName,
+            "path": node.path,
+            "nodeType": node.nodeType,
+            "attributes": [{"name": a.name, "value": a.value} for a in node.attributes],
+        })
+
+    nodes_json = json.dumps(nodes_data, ensure_ascii=False, indent=2)
+
+    # Build chain
     prompt = ChatPromptTemplate.from_messages([
         ("system", SYSTEM_MSG),
         ("user", USER_TEMPLATE),
@@ -74,31 +93,20 @@ Return ONLY strict JSON:
 
     llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0)
     parser = JsonOutputParser()
-    return prompt | llm | parser
+    chain = prompt | llm | parser
+
+    # One LLM call for all nodes
+    return chain.invoke({"nodes_json": nodes_json})
 
 
-def llm_explain_node(node: Node):
-    attrs_json = json.dumps([{"name": a.name, "value": a.value} for a in node.attributes], ensure_ascii=False)
-    chain = build_chain(node)
-    return chain.invoke({
-        "elemName": node.elemName,
-        "path": node.path,
-        "nodeType": node.nodeType,
-        "attributes_json": attrs_json,
-    })
-
-
+# ---- API Endpoint ----
 @app.post("/explain-smartform")
 async def explain_smartform(payload: SmartFormInput):
-    rows = []
-    for node in payload.nodes:
-        try:
-            llm_result = llm_explain_node(node)
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
-        rows.append(llm_result)
+    try:
+        rows = llm_explain_nodes(payload.nodes)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
 
-    # Final JSON "table"
     return {
         "formName": payload.formName,
         "system": payload.system,
