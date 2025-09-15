@@ -51,38 +51,62 @@ def llm_explain_nodes(nodes: List[Node]):
     SYSTEM_MSG = "You are an SAP SmartForm and ABAP expert. Always respond in strict JSON."
 
     USER_TEMPLATE = """
-You are reviewing multiple SmartForm nodes.
+You are reviewing multiple SmartForm nodes. 
+Group them into a hierarchy:
+- At the top: PAGE (elemName=PAGE or NODETYPE=PA).
+- Under PAGE: WINDOWS (elemName=WINDOW or NODETYPE=WI).
+- Under WINDOW: all child nodes (depth > window depth).
 
-For each node, explain its **technical mapping and coding**.
+For each element, include:
+- elemName
+- path
+- nodeType
+- attributes
+- mapping (technical field mapping or SmartForm meaning)
+- coding (ABAP / form logic if relevant)
+- usage (business/functional purpose)
 
-Return ONLY a strict JSON array of rows like this:
-[
-  {{
-    "elemName": "...",
-    "path": "...",
-    "nodeType": "...",
-    "attributes": [...],
-    "mapping": "...",
-    "coding": "...",
-    "usage": "..."
-  }},
-  ...
-]
+Return ONLY a strict JSON object like:
+{{
+  "pages": [
+    {{
+      "page": "Page Name / ID",
+      "windows": [
+        {{
+          "window": "Window Name",
+          "elements": [
+            {{
+              "elemName": "...",
+              "path": "...",
+              "nodeType": "...",
+              "attributes": [...],
+              "mapping": "...",
+              "coding": "...",
+              "usage": "..."
+            }}
+          ]
+        }}
+      ]
+    }}
+  ]
+}}
 
-Here are the nodes:
+
+Nodes:
 {nodes_json}
 """
-
-    # Convert nodes to clean JSON input
-    nodes_data = []
-    for node in nodes:
-        nodes_data.append({
-            "elemName": node.elemName,
-            "path": node.path,
-            "nodeType": node.nodeType,
-            "attributes": [{"name": a.name, "value": a.value} for a in node.attributes],
-        })
-
+    # Prepare input for LLM
+    nodes_data = [
+        {
+            "elemName": n.elemName,
+            "path": n.path,
+            "nodeType": n.nodeType,
+            "depth": n.depth,
+            "attributes": [{"name": a.name, "value": a.value} for a in n.attributes],
+            "textPayload": n.textPayload,
+        }
+        for n in nodes
+    ]
     nodes_json = json.dumps(nodes_data, ensure_ascii=False, indent=2)
 
     # Build chain
@@ -95,7 +119,6 @@ Here are the nodes:
     parser = JsonOutputParser()
     chain = prompt | llm | parser
 
-    # One LLM call for all nodes
     return chain.invoke({"nodes_json": nodes_json})
 
 
