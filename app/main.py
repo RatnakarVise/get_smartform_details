@@ -82,7 +82,8 @@ def llm_explain_nodes(nodes: List[Node]):
     USER_TEMPLATE = """
 You are reviewing multiple SmartForm nodes. 
 Group them into a hierarchy:
-- At the top: PAGE (elemName=PAGE or NODETYPE=PA).
+- At the top: PAGE (elemName=PAGE or NODETYPE=PA, 
+  or elemName=CAPTION/INAME that represent page captions/names).
 - Under PAGE: WINDOWS (elemName=WINDOW or NODETYPE=WI).
 - Under WINDOW: all child nodes (depth > window depth).
 
@@ -101,6 +102,7 @@ For each element, include:
 
 ⚠️ Important:
 - If a PAGE name is not explicitly available in the node data, set "page": "" (empty string). 
+-"page": "Use CAPTION/INAME textPayload if available, otherwise empty string."
 - Do NOT invent or add a generic name like "Page 1" or "Unnamed Page".
 
 Return ONLY a strict JSON object like:
