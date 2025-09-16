@@ -99,11 +99,15 @@ For each element, include:
           If none, put "".
 - usage: Business/functional purpose of this element with the variables and tables name explain.
 
+⚠️ Important:
+- If a PAGE name is not explicitly available in the node data, set "page": "" (empty string). 
+- Do NOT invent or add a generic name like "Page 1" or "Unnamed Page".
+
 Return ONLY a strict JSON object like:
 {{
   "pages": [
     {{
-      "page": "Page Name / ID",
+      "page": "",   <-- leave blank if no page name
       "windows": [
         {{
           "window": "Window Name",
