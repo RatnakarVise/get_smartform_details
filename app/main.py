@@ -46,6 +46,35 @@ class SmartFormInput(BaseModel):
     nodes: List[Node]
 
 
+# ---- Merge Logic for Consecutive ITEM Nodes ----
+def merge_consecutive_items(nodes: List[Node]) -> List[Node]:
+    merged_nodes = []
+    buffer_node = None
+
+    for node in nodes:
+        if node.elemName.upper() == "ITEM":  # condition: ITEM nodes
+            if buffer_node is None:
+                # start a new buffer
+                buffer_node = Node(**node.dict())
+            else:
+                # merge textPayload
+                buffer_node.textPayload += "\n" + node.textPayload
+                # merge attributes too
+                buffer_node.attributes.extend(node.attributes)
+        else:
+            # flush buffer before adding non-ITEM node
+            if buffer_node:
+                merged_nodes.append(buffer_node)
+                buffer_node = None
+            merged_nodes.append(node)
+
+    # flush last buffer if still active
+    if buffer_node:
+        merged_nodes.append(buffer_node)
+
+    return merged_nodes
+
+
 # ---- LLM Batch Explainer ----
 def llm_explain_nodes(nodes: List[Node]):
     SYSTEM_MSG = "You are an SAP SmartForm and ABAP expert. Always respond in strict JSON."
@@ -62,9 +91,13 @@ For each element, include:
 - path
 - nodeType
 - attributes
-- mapping (technical field mapping or SmartForm meaning)
-- coding (ABAP / form logic if relevant)
-- usage (business/functional purpose)
+- textPayload
+- mapping: Mention any SAP tables, structures, or fields referenced in this node. 
+           If none, put "".
+- coding: Mention all ABAP variables and code logic from textPayload. 
+          Show them clearly (e.g., variable declarations, assignments, SELECTs). 
+          If none, put "".
+- usage: Business/functional purpose of this element with the variables and tables name explain.
 
 Return ONLY a strict JSON object like:
 {{
@@ -77,6 +110,7 @@ Return ONLY a strict JSON object like:
           "elements": [
             {{
               "elemName": "...",
+              "textPayload": "...", 
               "path": "...",
               "nodeType": "...",
               "attributes": [...],
@@ -91,10 +125,13 @@ Return ONLY a strict JSON object like:
   ]
 }}
 
-
 Nodes:
 {nodes_json}
 """
+
+    # --- PRE-PROCESS: Merge ITEM nodes ---
+    merged_nodes = merge_consecutive_items(nodes)
+
     # Prepare input for LLM
     nodes_data = [
         {
@@ -105,7 +142,7 @@ Nodes:
             "attributes": [{"name": a.name, "value": a.value} for a in n.attributes],
             "textPayload": n.textPayload,
         }
-        for n in nodes
+        for n in merged_nodes
     ]
     nodes_json = json.dumps(nodes_data, ensure_ascii=False, indent=2)
 
