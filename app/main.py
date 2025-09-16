@@ -52,27 +52,88 @@ def merge_consecutive_items(nodes: List[Node]) -> List[Node]:
     buffer_node = None
 
     for node in nodes:
-        if node.elemName.upper() == "ITEM":  # condition: ITEM nodes
+        # treat "item" case-insensitively
+        if node.elemName and node.elemName.strip().upper() == "ITEM":
             if buffer_node is None:
-                # start a new buffer
                 buffer_node = Node(**node.dict())
             else:
-                # merge textPayload
-                buffer_node.textPayload += "\n" + node.textPayload
-                # merge attributes too
-                buffer_node.attributes.extend(node.attributes)
+                # merge textPayload (preserve order)
+                buffer_node.textPayload = (buffer_node.textPayload or "") + "\n" + (node.textPayload or "")
+                # merge attributes
+                buffer_node.attributes.extend(node.attributes or [])
         else:
-            # flush buffer before adding non-ITEM node
+            # flush buffer before non-ITEM node
             if buffer_node:
                 merged_nodes.append(buffer_node)
                 buffer_node = None
             merged_nodes.append(node)
 
-    # flush last buffer if still active
+    # final flush
     if buffer_node:
         merged_nodes.append(buffer_node)
 
     return merged_nodes
+
+
+# ---- Page Name Extractor ----
+def extract_page_name(nodes: List[Node]) -> str:
+    """
+    Extract the correct page name:
+     - Look for a PAGE marker (elemName == 'PAGE') OR a NODETYPE node whose textPayload == 'PA'.
+     - When found, scan its subtree (subsequent nodes with depth > page_depth) for the first CAPTION or INAME with a non-empty textPayload.
+     - If none found, return empty string.
+    This prevents picking captions that belong to CODE blocks or other regions.
+    """
+    if not nodes:
+        return ""
+
+    n = len(nodes)
+    for i, node in enumerate(nodes):
+        try:
+            elem_upper = (node.elemName or "").strip().upper()
+            node_text = (node.textPayload or "").strip()
+        except Exception:
+            elem_upper = ""
+            node_text = ""
+
+        # Candidate page marker:
+        is_page_marker = False
+        if elem_upper == "PAGE":
+            is_page_marker = True
+        # Some payloads set elemName == "NODETYPE" and textPayload == "PA"
+        elif elem_upper == "NODETYPE" and node_text.upper() == "PA":
+            is_page_marker = True
+        # Also allow explicit nodeType property == 'PA' (if populated)
+        elif (node.nodeType or "").strip().upper() == "PA":
+            is_page_marker = True
+
+        if not is_page_marker:
+            continue
+
+        page_depth = node.depth or 0
+
+        # Search forward for CAPTION / INAME within subtree (depth > page_depth)
+        j = i + 1
+        while j < n:
+            nj = nodes[j]
+            # if depth <= page_depth, we've left subtree
+            if (nj.depth or 0) <= page_depth:
+                break
+            nelem = (nj.elemName or "").strip().upper()
+            ntext = (nj.textPayload or "").strip()
+            if nelem in ("CAPTION", "INAME") and ntext:
+                return ntext
+            j += 1
+
+        # If PAGE node has attributes that carry the name, check them
+        for attr in (node.attributes or []):
+            if (attr.name or "").strip().lower() in ("name", "iname", "caption") and (attr.value or "").strip():
+                return (attr.value or "").strip()
+
+        # otherwise continue searching for next page marker
+
+    # No explicit page marker with caption found → return empty string (do NOT invent)
+    return ""
 
 
 # ---- LLM Batch Explainer ----
@@ -80,10 +141,9 @@ def llm_explain_nodes(nodes: List[Node]):
     SYSTEM_MSG = "You are an SAP SmartForm and ABAP expert. Always respond in strict JSON."
 
     USER_TEMPLATE = """
-You are reviewing multiple SmartForm nodes. 
+You are reviewing multiple SmartForm nodes.
 Group them into a hierarchy:
-- At the top: PAGE (elemName=PAGE or NODETYPE=PA, 
-  or elemName=CAPTION/INAME that represent page captions/names).
+- At the top: PAGE (value already extracted and provided as "{page_name}").
 - Under PAGE: WINDOWS (elemName=WINDOW or NODETYPE=WI).
 - Under WINDOW: all child nodes (depth > window depth).
 
@@ -93,30 +153,26 @@ For each element, include:
 - nodeType
 - attributes
 - textPayload
-- mapping: Mention any SAP tables, structures, or fields referenced in this node. 
-           If none, put "".
-- coding: Mention all ABAP variables and code logic from textPayload. 
-          Show them clearly (e.g., variable declarations, assignments, SELECTs). 
-          If none, put "".
-- usage: Business/functional purpose of this element with the variables and tables name explain.
+- mapping: Mention any SAP tables, structures, or fields referenced in this node. If none, put "".
+- coding: Mention all ABAP variables and code logic from textPayload. Show them clearly (e.g., variable declarations, assignments, SELECTs). If none, put "".
+- usage: Business/functional purpose of this element with the variables and tables name explained.
 
 ⚠️ Important:
-- If a PAGE name is not explicitly available in the node data, set "page": "" (empty string). 
--"page": "Use CAPTION/INAME textPayload if available, otherwise empty string."
+- Always set "page": "{page_name}" exactly. If empty string is provided, keep it empty.
 - Do NOT invent or add a generic name like "Page 1" or "Unnamed Page".
 
-Return ONLY a strict JSON object like:
+Return ONLY a strict JSON object with the structure:
 {{
   "pages": [
     {{
-      "page": "",   <-- leave blank if no page name
+      "page": "{page_name}",
       "windows": [
         {{
           "window": "Window Name",
           "elements": [
             {{
               "elemName": "...",
-              "textPayload": "...", 
+              "textPayload": "...",
               "path": "...",
               "nodeType": "...",
               "attributes": [...],
@@ -131,21 +187,24 @@ Return ONLY a strict JSON object like:
   ]
 }}
 
-Nodes:
+Nodes (the preprocessed, merged nodes array):
 {nodes_json}
 """
 
     # --- PRE-PROCESS: Merge ITEM nodes ---
     merged_nodes = merge_consecutive_items(nodes)
 
-    # Prepare input for LLM
+    # --- Extract page name (strictly from node structure) ---
+    page_name = extract_page_name(merged_nodes)
+
+    # Prepare input for LLM (flatten nodes to simple dicts)
     nodes_data = [
         {
             "elemName": n.elemName,
             "path": n.path,
             "nodeType": n.nodeType,
             "depth": n.depth,
-            "attributes": [{"name": a.name, "value": a.value} for a in n.attributes],
+            "attributes": [{"name": a.name, "value": a.value} for a in (n.attributes or [])],
             "textPayload": n.textPayload,
         }
         for n in merged_nodes
@@ -162,7 +221,8 @@ Nodes:
     parser = JsonOutputParser()
     chain = prompt | llm | parser
 
-    return chain.invoke({"nodes_json": nodes_json})
+    # pass both nodes_json and page_name into the template
+    return chain.invoke({"nodes_json": nodes_json, "page_name": page_name})
 
 
 # ---- API Endpoint ----
